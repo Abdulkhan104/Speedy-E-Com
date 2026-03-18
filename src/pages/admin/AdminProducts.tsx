@@ -1,7 +1,8 @@
 // src/pages/admin/AdminProducts.tsx
 import { useEffect, useState } from 'react'
 import { supabase } from '../../lib/supabase'
-import type { Product } from '../../lib/types' // <-- FIX: type-only import
+import type { Product } from '../../lib/types'
+import ImageUploader from '../../components/ImageUploader'
 
 type ProductForm = {
   name: string
@@ -14,22 +15,16 @@ type ProductForm = {
 }
 
 const EMPTY_FORM: ProductForm = {
-  name: '',
-  description: '',
-  price: 0,
-  stock: 0,
-  image_url: '',
-  category: '',
-  is_active: true,
+  name: '', description: '', price: 0,
+  stock: 0, image_url: '', category: '', is_active: true,
 }
 
-const FIELDS: { key: keyof ProductForm; label: string; type: string }[] = [
-  { key: 'name',        label: 'Name',       type: 'text'   },
-  { key: 'description', label: 'Description',type: 'text'   },
-  { key: 'price',       label: 'Price (₹)',  type: 'number' },
-  { key: 'stock',       label: 'Stock',      type: 'number' },
-  { key: 'category',    label: 'Category',   type: 'text'   },
-  { key: 'image_url',   label: 'Image URL',  type: 'text'   },
+const TEXT_FIELDS: { key: keyof ProductForm; label: string; type: string }[] = [
+  { key: 'name',        label: 'Name',      type: 'text'   },
+  { key: 'description', label: 'Description', type: 'text' },
+  { key: 'price',       label: 'Price (₹)', type: 'number' },
+  { key: 'stock',       label: 'Stock',     type: 'number' },
+  { key: 'category',    label: 'Category',  type: 'text'   },
 ]
 
 export default function AdminProducts() {
@@ -82,15 +77,13 @@ export default function AdminProducts() {
   }
 
   async function save() {
-    if (!form.name.trim()) return alert('Name is required')
+    if (!form.name.trim()) { alert('Name is required'); return }
     setSaving(true)
-
     if (editingId) {
       await supabase.from('products').update(form).eq('id', editingId)
     } else {
       await supabase.from('products').insert(form)
     }
-
     setSaving(false)
     closeModal()
     load()
@@ -105,7 +98,7 @@ export default function AdminProducts() {
   }
 
   async function deleteProduct(id: string) {
-    if (!window.confirm('Delete this product? This cannot be undone.')) return
+    if (!window.confirm('Delete this product?')) return
     await supabase.from('products').delete().eq('id', id)
     load()
   }
@@ -121,56 +114,52 @@ export default function AdminProducts() {
         </button>
       </div>
 
-      <div className="admin-table-wrap">
-        <table className="admin-table">
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Category</th>
-              <th>Price</th>
-              <th>Stock</th>
-              <th>Status</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {products.map(p => (
-              <tr key={p.id}>
-                <td style={{ fontWeight: 500 }}>{p.name}</td>
-                <td>{p.category ?? '—'}</td>
-                <td>₹{p.price.toLocaleString('en-IN')}</td>
-                <td>
-                  <span className={p.stock <= 5 ? 'low-stock-text' : ''}>
-                    {p.stock}
-                  </span>
-                </td>
-                <td>
-                  <button
-                    className={`toggle-btn ${p.is_active ? 'active' : 'inactive'}`}
-                    onClick={() => toggleActive(p)}
-                  >
-                    {p.is_active ? 'Active' : 'Hidden'}
-                  </button>
-                </td>
-                <td>
-                  <div className="action-btns">
-                    <button className="edit-btn" onClick={() => openEdit(p)}>Edit</button>
-                    <button className="delete-btn" onClick={() => deleteProduct(p.id)}>Delete</button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-            {products.length === 0 && (
-              <tr>
-                <td colSpan={6} style={{ textAlign: 'center', color: '#9ca3af', padding: 32 }}>
-                  No products yet. Add one above.
-                </td>
-              </tr>
-            )}
-          </tbody>
-        </table>
+      {/* Product grid with image thumbnails */}
+      <div className="admin-product-grid">
+        {products.map(p => (
+          <div key={p.id} className="admin-product-card">
+            {/* Thumbnail */}
+            <div className="admin-product-thumb">
+              {p.image_url ? (
+                <img src={p.image_url} alt={p.name} />
+              ) : (
+                <span className="admin-product-initial">{p.name[0]}</span>
+              )}
+            </div>
+
+            {/* Info */}
+            <div className="admin-product-info">
+              <p className="admin-product-name">{p.name}</p>
+              <p className="admin-product-meta">
+                ₹{p.price.toLocaleString('en-IN')} · Stock: {p.stock}
+              </p>
+              {p.category && (
+                <p className="admin-product-cat">{p.category}</p>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="admin-product-actions">
+              <button
+                className={`toggle-btn ${p.is_active ? 'active' : 'inactive'}`}
+                onClick={() => toggleActive(p)}
+              >
+                {p.is_active ? 'Active' : 'Hidden'}
+              </button>
+              <button className="edit-btn" onClick={() => openEdit(p)}>Edit</button>
+              <button className="delete-btn" onClick={() => deleteProduct(p.id)}>✕</button>
+            </div>
+          </div>
+        ))}
+
+        {products.length === 0 && (
+          <p style={{ color: 'var(--muted)', fontSize: 13 }}>
+            No products yet. Click "+ Add product" to create one.
+          </p>
+        )}
       </div>
 
+      {/* Modal */}
       {showModal && (
         <div className="admin-modal-overlay" onClick={closeModal}>
           <div className="admin-modal" onClick={e => e.stopPropagation()}>
@@ -178,8 +167,17 @@ export default function AdminProducts() {
               {editingId ? 'Edit product' : 'Add product'}
             </h2>
 
+            {/* Image uploader — top of modal */}
+            <div className="form-group" style={{ marginBottom: 16 }}>
+              <label>Product image</label>
+              <ImageUploader
+                currentUrl={form.image_url}
+                onUpload={url => updateField('image_url', url)}
+              />
+            </div>
+
             <div className="modal-form">
-              {FIELDS.map(({ key, label, type }) => (
+              {TEXT_FIELDS.map(({ key, label, type }) => (
                 <div key={key} className="form-group">
                   <label>{label}</label>
                   <input
@@ -189,14 +187,24 @@ export default function AdminProducts() {
                     onChange={e =>
                       updateField(
                         key,
-                        type === 'number' ? Number(e.target.value) : e.target.value
+                        type === 'number'
+                          ? Number(e.target.value)
+                          : e.target.value
                       )
                     }
                   />
                 </div>
               ))}
 
-              <div className="form-group" style={{ flexDirection: 'row', alignItems: 'center', gap: 8, gridColumn: 'span 2' }}>
+              <div
+                className="form-group"
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 8,
+                  gridColumn: 'span 2',
+                }}
+              >
                 <input
                   id="is_active"
                   type="checkbox"
