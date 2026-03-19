@@ -4,6 +4,13 @@ import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { useCart } from '../hooks/useCart'
 
+// Tell TypeScript about Razorpay global loaded from index.html script tag
+declare global {
+  interface Window {
+    Razorpay: any
+  }
+}
+
 type CartItemWithProduct = {
   id: string
   product_id: string
@@ -25,8 +32,9 @@ export default function Checkout() {
   const { fetchCartCount } = useCart()
   const [items, setItems] = useState<CartItemWithProduct[]>([])
   const [userId, setUserId] = useState<string>('')
+  const [userEmail, setUserEmail] = useState<string>('')
   const [loading, setLoading] = useState(true)
-  const [placing, setPlacing] = useState(false)
+  const [paying, setPaying] = useState(false)
   const [address, setAddress] = useState<Address>({
     name: '', line1: '', city: '', state: '', pincode: '', phone: '',
   })
@@ -35,6 +43,7 @@ export default function Checkout() {
     supabase.auth.getUser().then(({ data }) => {
       if (!data.user) { navigate('/auth'); return }
       setUserId(data.user.id)
+      setUserEmail(data.user.email ?? '')
       loadCart(data.user.id)
     })
   }, [])
@@ -56,45 +65,125 @@ export default function Checkout() {
     setAddress(prev => ({ ...prev, [field]: value }))
   }
 
-  async function placeOrder(e: React.FormEvent) {
+  async function handlePayment(e: React.FormEvent) {
     e.preventDefault()
     if (!items.length) return
-    setPlacing(true)
+    setPaying(true)
 
-    // 1. Create the order record
-    const { data: order, error } = await supabase
-      .from('orders')
-      .insert({
-        user_id: userId,
-        status: 'pending',
-        total,
-        shipping_address: address,
-      })
-      .select()
-      .single()
+    try {
+      // Step 1 — Create order in Supabase with status "pending"
+      const { data: order, error } = await supabase
+        .from('orders')
+        .insert({
+          user_id: userId,
+          status: 'pending',
+          total,
+          shipping_address: address,
+        })
+        .select()
+        .single()
 
-    if (error || !order) {
-      alert('Failed to place order. Please try again.')
-      setPlacing(false)
-      return
+      if (error || !order) {
+        alert('Failed to create order. Please try again.')
+        setPaying(false)
+        return
+      }
+
+      // Step 2 — Insert order items (price snapshot)
+      await supabase.from('order_items').insert(
+        items.map(i => ({
+          order_id: order.id,
+          product_id: i.product_id,
+          quantity: i.quantity,
+          unit_price: i.product.price,
+        }))
+      )
+
+      // Step 3 — Call Edge Function to get Razorpay order ID
+      const { data: fnData, error: fnError } = await supabase.functions.invoke(
+        'create-razorpay-order',
+        {
+          body: {
+            amount: total,
+            currency: 'INR',
+            receipt: `order_${order.id.slice(0, 8)}`,
+          },
+        }
+      )
+
+      if (fnError || !fnData?.razorpay_order_id) {
+        alert('Payment initiation failed. Please try again.')
+        // Clean up the pending order
+        await supabase.from('order_items').delete().eq('order_id', order.id)
+        await supabase.from('orders').delete().eq('id', order.id)
+        setPaying(false)
+        return
+      }
+
+      // Step 4 — Open Razorpay payment modal
+      const options = {
+        key: import.meta.env.VITE_RAZORPAY_KEY_ID,
+        amount: fnData.amount,            // in paise
+        currency: fnData.currency,
+        name: 'SpeedyCart',
+        description: `Order #${order.id.slice(0, 8).toUpperCase()}`,
+        order_id: fnData.razorpay_order_id,
+        prefill: {
+          name: address.name,
+          email: userEmail,
+          contact: address.phone,
+        },
+        theme: { color: '#f97316' },
+
+        // Step 5 — On payment success, verify server-side
+        handler: async (response: {
+          razorpay_payment_id: string
+          razorpay_order_id: string
+          razorpay_signature: string
+        }) => {
+          const { data: verifyData, error: verifyError } =
+            await supabase.functions.invoke('verify-razorpay-payment', {
+              body: {
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                order_id: order.id,
+                user_id: userId,
+              },
+            })
+
+          if (verifyError || !verifyData?.success) {
+            alert(
+              'Payment verification failed. Contact support with payment ID: ' +
+              response.razorpay_payment_id
+            )
+            setPaying(false)
+            return
+          }
+
+          // Verified — Edge Function already cleared the cart
+          fetchCartCount()
+          navigate('/orders', { state: { newOrderId: order.id } })
+        },
+
+        // User dismissed modal without paying — clean up
+        modal: {
+          ondismiss: async () => {
+            await supabase.from('order_items').delete().eq('order_id', order.id)
+            await supabase.from('orders').delete().eq('id', order.id)
+            setPaying(false)
+          },
+        },
+      }
+
+      const rzp = new window.Razorpay(options)
+      rzp.open()
+
+    } catch (err) {
+      console.error(err)
+      alert('Something went wrong. Please try again.')
+      setPaying(false)
     }
-
-    // 2. Insert order items (snapshot prices)
-    await supabase.from('order_items').insert(
-      items.map(i => ({
-        order_id: order.id,
-        product_id: i.product_id,
-        quantity: i.quantity,
-        unit_price: i.product.price,
-      }))
-    )
-
-    // 3. Clear cart
-    await supabase.from('cart_items').delete().eq('user_id', userId)
-    fetchCartCount()
-
-    // 4. Navigate to orders page
-    navigate('/orders', { state: { newOrderId: order.id } })
   }
 
   if (loading) return <div className="page">Loading checkout...</div>
@@ -103,7 +192,7 @@ export default function Checkout() {
     <div className="page">
       <div className="empty-state">
         <p>Your cart is empty.</p>
-        <button className="nav-btn" onClick={() => navigate('/')} style={{marginTop:16}}>
+        <button className="nav-btn" onClick={() => navigate('/')} style={{ marginTop: 16 }}>
           Browse products
         </button>
       </div>
@@ -113,19 +202,19 @@ export default function Checkout() {
   return (
     <div className="page">
       <h1 className="cart-title">Checkout</h1>
-      <form onSubmit={placeOrder} className="checkout-layout">
+      <form onSubmit={handlePayment} className="checkout-layout">
 
-        {/* Shipping address */}
+        {/* Shipping address — same as your original */}
         <div className="checkout-section">
           <h2 className="checkout-section-title">Shipping address</h2>
           <div className="checkout-form">
             {[
-              { field: 'name',    label: 'Full name',    type: 'text',  ph: 'Rahul Sharma' },
-              { field: 'phone',   label: 'Phone',        type: 'tel',   ph: '9876543210' },
-              { field: 'line1',   label: 'Address',      type: 'text',  ph: '123, MG Road, Apt 4B' },
-              { field: 'city',    label: 'City',         type: 'text',  ph: 'Hyderabad' },
-              { field: 'state',   label: 'State',        type: 'text',  ph: 'Telangana' },
-              { field: 'pincode', label: 'PIN code',     type: 'text',  ph: '500001' },
+              { field: 'name',    label: 'Full name', type: 'text', ph: 'Rahul Sharma'       },
+              { field: 'phone',   label: 'Phone',     type: 'tel',  ph: '9876543210'          },
+              { field: 'line1',   label: 'Address',   type: 'text', ph: '123, MG Road, Apt 4B'},
+              { field: 'city',    label: 'City',      type: 'text', ph: 'Hyderabad'           },
+              { field: 'state',   label: 'State',     type: 'text', ph: 'Telangana'           },
+              { field: 'pincode', label: 'PIN code',  type: 'text', ph: '500001'              },
             ].map(({ field, label, type, ph }) => (
               <div key={field} className="form-group">
                 <label>{label}</label>
@@ -141,17 +230,17 @@ export default function Checkout() {
           </div>
         </div>
 
-        {/* Order summary */}
+        {/* Order summary sidebar — same layout as your original */}
         <div className="checkout-sidebar">
           <div className="cart-summary">
             <h2>Order summary</h2>
-            <div style={{marginBottom:14,display:'flex',flexDirection:'column',gap:10}}>
+            <div style={{ marginBottom: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
               {items.map(i => (
-                <div key={i.id} style={{display:'flex',justifyContent:'space-between',fontSize:13}}>
-                  <span style={{color:'var(--muted)'}}>
+                <div key={i.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                  <span style={{ color: 'var(--muted)' }}>
                     {i.product.name} × {i.quantity}
                   </span>
-                  <span style={{fontWeight:600}}>
+                  <span style={{ fontWeight: 600 }}>
                     ₹{(i.product.price * i.quantity).toLocaleString('en-IN')}
                   </span>
                 </div>
@@ -168,10 +257,13 @@ export default function Checkout() {
             <button
               type="submit"
               className="checkout-btn"
-              disabled={placing}
+              disabled={paying}
             >
-              {placing ? 'Placing order...' : 'Place order'}
+              {paying ? 'Opening payment...' : `Pay ₹${total.toLocaleString('en-IN')}`}
             </button>
+            <p style={{ fontSize: 11, color: 'var(--muted)', textAlign: 'center', marginTop: 10 }}>
+              Secured by Razorpay
+            </p>
           </div>
         </div>
 
