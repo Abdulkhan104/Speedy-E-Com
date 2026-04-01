@@ -74,7 +74,7 @@ export default function Home() {
         </div>
       ) : filtered.length === 0 ? (
         <div className="empty-state">
-          <p>No products found.</p>
+          <p>No products found...😔</p>
         </div>
       ) : (
         <div className="grid">
